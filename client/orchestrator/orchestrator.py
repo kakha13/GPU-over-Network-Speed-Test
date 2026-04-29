@@ -46,6 +46,18 @@ s3 = boto3.client(
 VIDEOS_DIR = Path("/test-videos")
 VIDEOS_DIR.mkdir(exist_ok=True)
 
+# ONLY_VIDEOS lets you restrict the run to a subset (substring match against the
+# video name). Useful for single-video benchmarks. Example:
+#   docker compose run --rm -e ONLY_VIDEOS=large_300s orchestrator ...
+_only_raw = os.environ.get("ONLY_VIDEOS", "").strip()
+ONLY_VIDEOS = [s.strip() for s in _only_raw.split(",") if s.strip()] if _only_raw else None
+
+
+def _match(name: str) -> bool:
+    if not ONLY_VIDEOS:
+        return True
+    return any(needle in name for needle in ONLY_VIDEOS)
+
 
 def generate_test_videos():
     """Generate a few test videos of varying size with FFmpeg."""
@@ -56,6 +68,8 @@ def generate_test_videos():
         ("large_300s_1080p", 300, "1920x1080", "8M"),
     ]
     for name, dur, res, br in presets:
+        if not _match(name):
+            continue
         out = VIDEOS_DIR / f"{name}.mp4"
         if out.exists():
             print(f"  [skip] {out.name} already exists ({out.stat().st_size/1e6:.1f} MB)")
@@ -81,6 +95,8 @@ def upload_test_videos():
     """Push test videos to MinIO under incoming/"""
     results = {}
     for f in sorted(VIDEOS_DIR.glob("*.mp4")):
+        if not _match(f.stem):
+            continue
         key = f"incoming/{f.name}"
         size = f.stat().st_size
         print(f"  [up]   {f.name} ({size/1e6:.1f} MB) -> s3://{S3_BUCKET}/{key}")

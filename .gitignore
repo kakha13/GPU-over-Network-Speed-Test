@@ -1,7 +1,11 @@
 client/test-videos/*
+client/test-videos-extra/
 test-videos/*
+test-videos-extra/
 client/.env
 worker/.env
 .env
 worker/docker-compose.override.yml
 docker-compose.override.yml
+.DS_Store
+**/.DS_Store
