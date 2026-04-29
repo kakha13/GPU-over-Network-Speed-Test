@@ -29,7 +29,17 @@ JOB_QUEUE = "gpu_jobs"
 RESULT_PREFIX = "result:"
 
 print(f"[worker] Connecting to Redis at {SERVER_HOST}:6379 ...")
-r = redis.from_url(REDIS_URL, socket_timeout=10)
+# socket_timeout must exceed BRPOP timeout (30s) or the read aborts before
+# a blocking pop completes, raising TimeoutError and risking job loss when
+# the server has already popped an item but the client closed the socket.
+# socket_connect_timeout still bounds the initial connect for fast-fail.
+r = redis.from_url(
+    REDIS_URL,
+    socket_connect_timeout=10,
+    socket_timeout=35,
+    socket_keepalive=True,
+    health_check_interval=30,
+)
 r.ping()
 print(f"[worker] Redis OK")
 
