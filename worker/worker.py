@@ -122,22 +122,30 @@ def process_job(job: dict) -> dict:
         result["download_s"] = time.monotonic() - t0
         result["input_duration_s"] = get_input_duration(src)
 
-        # 2. GPU encode (speed-tuned for NVENC throughput benchmark)
+        # 2. GPU encode (1080 Ti / Pascal NVENC max-throughput config)
         t0 = time.monotonic()
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+            "-extra_hw_frames", "8",
+            "-c:v", "h264_cuvid",
             "-i", str(src),
             "-vf",
             f"scale_cuda={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h}",
             "-c:v", "h264_nvenc",
             "-preset", "p1",
-            "-tune", "ll",
+            "-tune", "ull",
             "-rc", "cbr",
             "-b:v", "8M",
             "-maxrate", "8M",
             "-bufsize", "16M",
+            "-bf", "0",
+            "-rc-lookahead", "0",
+            "-spatial_aq", "0",
+            "-temporal_aq", "0",
+            "-g", "120",
+            "-async_depth", "4",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             str(dst),
