@@ -48,7 +48,33 @@ gpu-test/
 
 ## Setup
 
-### 1. On the server (Linux)
+### Windows-only single-host mode (no LAN, fastest GPU benchmark)
+
+Use this when you just want to know what your GPU can do. Everything runs in
+one Docker compose stack on the same Windows machine; redis/minio/worker
+communicate over the internal Docker network so there is no LAN leg at all.
+
+```powershell
+git clone <this repo>
+cd gpu-test
+copy .env.example .env
+# (edit .env if you want non-default passwords)
+
+docker compose build
+docker compose up -d redis minio minio-init worker
+docker compose run --rm orchestrator python orchestrator.py full
+```
+
+The MinIO console is at `http://localhost:9001` (login = MINIO_USER / MINIO_PASSWORD).
+Test videos are written to `./test-videos/` on the host and reused across runs.
+
+### Split mode (LAN / cloud server + home GPU)
+
+Use this when you want to measure the production architecture: a Linux box
+running redis+minio (e.g. Hetzner) with the GPU worker on a different Windows
+machine reaching it over the LAN or internet.
+
+#### 1. On the server (Linux)
 
 ```bash
 cd client
@@ -63,7 +89,7 @@ docker compose ps   # all should be healthy
 
 Open the MinIO console at `http://YOUR_IP:9001` (login = MINIO_USER / MINIO_PASSWORD) to confirm the `gputest` bucket exists.
 
-### 2. On Windows (worker)
+#### 2. On Windows (worker)
 
 ```powershell
 cd worker
@@ -89,7 +115,7 @@ You should see:
 
 If NVENC is not visible, fix that **before** running the test (see Troubleshooting).
 
-### 3. Run the test (back on the server)
+#### 3. Run the test (back on the server)
 
 ```bash
 cd client

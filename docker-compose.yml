@@ -1,0 +1,97 @@
+# Single-host mode: runs the entire stack (redis + minio + orchestrator + worker)
+# on one Windows machine with the GPU. Worker reaches redis and minio by Docker
+# service DNS names, so there is no LAN leg involved at all.
+#
+# Use this when you want to benchmark the GPU itself without network noise.
+# For LAN / production-realistic testing (cloud client + home GPU), use the
+# split compose files in client/ and worker/ instead.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: gputest-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: gputest-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+    ports:
+      - "9001:9001"   # web console only; S3 API stays internal
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: gputest-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_USER:-admin} ${MINIO_PASSWORD:-changeme123};
+      mc mb -p local/gputest || true;
+      mc anonymous set download local/gputest || true;
+      echo 'Bucket ready';
+      "
+
+  orchestrator:
+    build: ./client/orchestrator
+    container_name: gputest-orchestrator
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: http://minio:9000
+      S3_KEY: ${MINIO_USER:-admin}
+      S3_SECRET: ${MINIO_PASSWORD:-changeme123}
+      S3_BUCKET: gputest
+    volumes:
+      - ./test-videos:/test-videos
+
+  worker:
+    build: ./worker
+    runtime: nvidia
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
+      MINIO_USER: ${MINIO_USER:-admin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    restart: unless-stopped
+
+volumes:
+  minio-data:

@@ -16,19 +16,22 @@ import boto3
 import redis
 from botocore.client import Config
 
-SERVER_HOST = os.environ["SERVER_HOST"]
 REDIS_PASSWORD = os.environ["REDIS_PASSWORD"]
 MINIO_USER = os.environ.get("MINIO_USER", "admin")
 MINIO_PASSWORD = os.environ["MINIO_PASSWORD"]
 
-REDIS_URL = f"redis://:{REDIS_PASSWORD}@{SERVER_HOST}:6379/0"
-S3_ENDPOINT = f"http://{SERVER_HOST}:9000"
-S3_BUCKET = "gputest"
+# Two ways to point the worker at services:
+#   single-host (compose internal DNS):  REDIS_URL, S3_ENDPOINT explicit
+#   split (LAN / cloud + home GPU):       SERVER_HOST builds both URLs
+SERVER_HOST = os.environ.get("SERVER_HOST", "")
+REDIS_URL = os.environ.get("REDIS_URL") or f"redis://:{REDIS_PASSWORD}@{SERVER_HOST}:6379/0"
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT") or f"http://{SERVER_HOST}:9000"
+S3_BUCKET = os.environ.get("S3_BUCKET", "gputest")
 
 JOB_QUEUE = "gpu_jobs"
 RESULT_PREFIX = "result:"
 
-print(f"[worker] Connecting to Redis at {SERVER_HOST}:6379 ...")
+print(f"[worker] Connecting to Redis at {REDIS_URL.split('@')[-1]} ...")
 # socket_timeout must exceed BRPOP timeout (30s) or the read aborts before
 # a blocking pop completes, raising TimeoutError and risking job loss when
 # the server has already popped an item but the client closed the socket.
@@ -51,7 +54,7 @@ s3 = boto3.client(
     config=Config(signature_version="s3v4"),
     region_name="us-east-1",
 )
-print(f"[worker] S3/MinIO endpoint set to {S3_ENDPOINT}")
+print(f"[worker] S3/MinIO endpoint set to {S3_ENDPOINT}  bucket={S3_BUCKET}")
 
 
 def check_gpu():

@@ -1,4 +1,6 @@
 client/test-videos/*
+test-videos/*
 client/.env
 worker/.env
+.env
 worker/docker-compose.override.yml
