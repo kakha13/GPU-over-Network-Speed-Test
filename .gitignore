@@ -4,3 +4,4 @@ client/.env
 worker/.env
 .env
 worker/docker-compose.override.yml
+docker-compose.override.yml
