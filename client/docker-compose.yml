@@ -1,0 +1,70 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: gputest-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme} --bind 0.0.0.0
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: gputest-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-changeme123}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Creates the bucket on first run
+  minio-init:
+    image: minio/mc:latest
+    container_name: gputest-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_USER:-admin} ${MINIO_PASSWORD:-changeme123};
+      mc mb -p local/gputest || true;
+      mc anonymous set download local/gputest || true;
+      echo 'Bucket ready';
+      "
+
+  orchestrator:
+    build: ./orchestrator
+    container_name: gputest-orchestrator
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_KEY: ${MINIO_USER:-admin}
+      S3_SECRET: ${MINIO_PASSWORD:-changeme123}
+      S3_BUCKET: gputest
+    volumes:
+      - ./test-videos:/test-videos
+    stdin_open: true
+    tty: true
+
+volumes:
+  minio-data:

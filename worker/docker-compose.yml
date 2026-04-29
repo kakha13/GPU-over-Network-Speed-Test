@@ -1,0 +1,32 @@
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gputest-worker
+    runtime: nvidia          # uses NVIDIA Container Toolkit
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all  # need 'video' for NVENC/NVDEC
+      # WSL2 NVENC fix: nvidia-container-toolkit only mounts a subset of WSL driver
+      # libs by default; adding /usr/lib/wsl/lib to the linker path lets ffmpeg
+      # find libnvidia-encode.so.1 / libnvcuvid.so.1 from the bind-mount below.
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+      # === EDIT THESE ===
+      SERVER_HOST: ${SERVER_HOST}             # e.g. 1.2.3.4 or hetzner.example.com
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MINIO_USER: ${MINIO_USER:-admin}
+      MINIO_PASSWORD: ${MINIO_PASSWORD}
+    volumes:
+      # Expose the full Windows-side NVIDIA driver tree to the container so NVENC
+      # libs (libnvidia-encode.so.1, libnvcuvid.so.1) are reachable. Required on
+      # WSL2; harmless on a pure Linux host (the path simply won't exist).
+      - /usr/lib/wsl:/usr/lib/wsl:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    restart: unless-stopped
