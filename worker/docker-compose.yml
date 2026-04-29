@@ -3,7 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: gputest-worker
     runtime: nvidia          # uses NVIDIA Container Toolkit
     environment:
       NVIDIA_VISIBLE_DEVICES: all
