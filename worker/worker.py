@@ -116,6 +116,13 @@ def process_job(job: dict) -> dict:
     preset = job.get("preset", "p4")
     cq = job.get("cq", 23)
 
+    # Chunked parallel encode: split source on GOP boundaries with stream
+    # copy, then encode each chunk in parallel via two NVENC sessions (the
+    # 1080 Ti has two independent NVENC engines, so we get ~2x per-video
+    # encode speed). Number of chunks is capped at NVENC_CHUNKS env var
+    # (default 2 — anything more queues up at the same 2 engines).
+    n_chunks = max(1, int(os.environ.get("NVENC_CHUNKS", "2")))
+
     workdir = Path(tempfile.mkdtemp(prefix=f"job-{jid[:8]}-"))
     src = workdir / "source.mp4"
     dst = workdir / "out.mp4"
@@ -125,45 +132,108 @@ def process_job(job: dict) -> dict:
         "src_name": job.get("src_name"),
         "src_size": job.get("src_size"),
         "encoder": "h264_nvenc",
+        "n_chunks": n_chunks,
         "started_at": time.time(),
     }
+
+    nvenc_args = [
+        "-vf",
+        f"scale_cuda={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{out_h}",
+        "-c:v", "h264_nvenc",
+        "-preset", "p1",
+        "-tune", "ull",
+        "-rc", "cbr",
+        "-b:v", "8M",
+        "-maxrate", "8M",
+        "-bufsize", "16M",
+        "-bf", "0",
+        "-rc-lookahead", "0",
+        "-spatial_aq", "0",
+        "-temporal_aq", "0",
+        "-g", "120",
+        "-async_depth", "4",
+        "-c:a", "aac", "-b:a", "128k",
+    ]
 
     try:
         # 1. Download
         t0 = time.monotonic()
         s3.download_file(S3_BUCKET, src_key, str(src))
         result["download_s"] = time.monotonic() - t0
-        result["input_duration_s"] = get_input_duration(src)
+        duration = get_input_duration(src)
+        result["input_duration_s"] = duration
 
-        # 2. GPU encode (1080 Ti / Pascal NVENC max-throughput config)
+        # 2. GPU encode
         t0 = time.monotonic()
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-            "-extra_hw_frames", "8",
-            "-c:v", "h264_cuvid",
-            "-i", str(src),
-            "-vf",
-            f"scale_cuda={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h}",
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",
-            "-tune", "ull",
-            "-rc", "cbr",
-            "-b:v", "8M",
-            "-maxrate", "8M",
-            "-bufsize", "16M",
-            "-bf", "0",
-            "-rc-lookahead", "0",
-            "-spatial_aq", "0",
-            "-temporal_aq", "0",
-            "-g", "120",
-            "-async_depth", "4",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(dst),
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        if n_chunks <= 1 or duration < 8:
+            # Single-pass path (small / short clips don't benefit from chunking)
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-extra_hw_frames", "8",
+                "-c:v", "h264_cuvid",
+                "-i", str(src),
+            ] + nvenc_args + ["-movflags", "+faststart", str(dst)]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        else:
+            # 2a. Split source on GOP boundaries (stream copy, ~1s)
+            seg_pattern = workdir / "seg_%03d.mp4"
+            seg_time = duration / n_chunks
+            split_cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(src),
+                "-c", "copy", "-map", "0",
+                "-f", "segment", "-segment_time", f"{seg_time:.3f}",
+                "-reset_timestamps", "1",
+                str(seg_pattern),
+            ]
+            subprocess.run(split_cmd, check=True, capture_output=True, text=True)
+            segs = sorted(workdir.glob("seg_*.mp4"))
+
+            # 2b. Encode each segment in parallel via NVENC
+            enc_outs = []
+            procs = []
+            for i, seg in enumerate(segs):
+                out_seg = workdir / f"enc_{i:03d}.mp4"
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                    "-extra_hw_frames", "8",
+                    "-c:v", "h264_cuvid",
+                    "-i", str(seg),
+                ] + nvenc_args + [str(out_seg)]
+                procs.append(subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                ))
+                enc_outs.append(out_seg)
+            for i, p in enumerate(procs):
+                _, err = p.communicate()
+                if p.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        p.returncode, p.args,
+                        stderr=err.decode(errors="replace"),
+                    )
+
+            # 2c. Concat encoded chunks (stream copy, ~1s)
+            concat_list = workdir / "list.txt"
+            concat_list.write_text(
+                "\n".join(f"file '{p.name}'" for p in enc_outs) + "\n"
+            )
+            concat_cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(dst),
+            ]
+            subprocess.run(
+                concat_cmd, check=True, capture_output=True, text=True,
+                cwd=workdir,
+            )
+
         result["encode_s"] = time.monotonic() - t0
         result["output_size"] = dst.stat().st_size
 
@@ -183,13 +253,14 @@ def process_job(job: dict) -> dict:
         result["error"] = f"{type(e).__name__}: {e}"
         traceback.print_exc()
     finally:
-        # Cleanup
-        for f in (src, dst):
-            try:
-                f.unlink()
-            except FileNotFoundError:
-                pass
+        # Cleanup: remove every file in workdir (covers source, output, and
+        # any seg_*/enc_*/list.txt left by the chunked path), then rmdir.
         try:
+            for f in workdir.iterdir():
+                try:
+                    f.unlink()
+                except FileNotFoundError:
+                    pass
             workdir.rmdir()
         except OSError:
             pass
