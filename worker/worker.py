@@ -122,7 +122,7 @@ def process_job(job: dict) -> dict:
         result["download_s"] = time.monotonic() - t0
         result["input_duration_s"] = get_input_duration(src)
 
-        # 2. GPU encode
+        # 2. GPU encode (speed-tuned for NVENC throughput benchmark)
         t0 = time.monotonic()
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -132,11 +132,12 @@ def process_job(job: dict) -> dict:
             f"scale_cuda={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h}",
             "-c:v", "h264_nvenc",
-            "-preset", preset,
-            "-tune", "hq",
-            "-rc", "vbr",
-            "-cq", str(cq),
-            "-b:v", "0",
+            "-preset", "p1",
+            "-tune", "ll",
+            "-rc", "cbr",
+            "-b:v", "8M",
+            "-maxrate", "8M",
+            "-bufsize", "16M",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             str(dst),
